@@ -1,4 +1,3 @@
-# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,30 +8,23 @@ venv/
 ENV/
 .venv
 
-# Environment variables
 .env
 .env.local
 
-# IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Data files
 *.csv
 prompts.csv
 results.csv
 
-# OS
 .DS_Store
 Thumbs.db
 
-# Local runs, model weights, and dependency caches
-runs/
 .cache/
-*.csv.meta.json
-*.checkpoint.json
+runs/
+*.csv.tmp
 .env.*
 !.env.example
-!examples/*.csv

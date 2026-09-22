@@ -1,130 +1,69 @@
-# LLM response comparison and RAG revision
+# LLM RAG Correction System
 
-A Python research demo that asks several models the same questions, measures agreement between their answers, and gives an outlying model selected peer answers as context for a second response.
+A Python research script that reads answers collected by the [batch runner](https://github.com/brianfeng31/LLM_batch_runner), uses selected peer answers as context, and asks a chosen model to answer the question again.
 
-The original project collected LLM outputs and used peer answers for RAG. This version makes collection, scoring, retrieval, and revision explicit and runnable. It **does not reproduce the paper's reported measurements**: the paper did not fully specify its evaluator or scoring formula, and this version documents its own numerical method. Peer agreement is not factual accuracy.
+## How it works
 
-## One-command demo
+1. Load the question and model answers from `results.csv`.
+2. The caller chooses the model to revise and the reference models.
+3. Embed the **question** and reference answers using `paraphrase-MiniLM-L6-v2`, then order the references by cosine similarity. The correction workflow includes all selected references; the retrieval helper also supports returning only the top k.
+4. Put the reference **text** and question into a new prompt and call the selected model through Ollama.
+5. Save the original and revised answers to `rag_corrections.csv`.
 
-Requires Python 3.12 or newer. From this repository:
+This script implements the retrieval and re-prompting portion of the research. Reference selection is manual: it does not implement the paper's evaluator, automatically choose a weaker model, or apply a 0.85 cutoff. Peer agreement and cosine similarity do not establish factual correctness. The arguments `wrong_model` and `correct_models` describe the caller's selections.
 
-```bash
-python3 pipeline.py --demo
-```
+## Setup
 
-Open `runs/demo/report.md`. No API key, third-party packages, model downloads, or paid requests are required. **The demo uses synthetic answers and manually assigned vectors**, including an intentionally unrelated answer for each question. It exercises the software, not model quality. See the [generated example report](examples/demo-report.md).
-
-```bash
-# Resume without repeating completed work.
-python3 pipeline.py --demo --resume
-
-# Exercise the optional reviewer interface with a synthetic JSON response.
-python3 pipeline.py --demo --reviewer fixture-reviewer --output-dir runs/demo-with-reviewer
-```
-
-## Real sentence embeddings
+Use Python 3.12 or later. From this repository:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python pipeline.py --demo --real-embeddings --output-dir runs/real-embeddings
+export OLLAMA_API_KEY="your-api-key"
 ```
 
-On Windows, activate with `.venv\Scripts\Activate.ps1`. The dependency lock was resolved and tested with Python 3.12. The first semantic run downloads `sentence-transformers/paraphrase-MiniLM-L6-v2`. This mode still uses synthetic generation responses but computes real embeddings and cosine similarities; its revision count can differ from the synthetic-vector demo.
+On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1` and set the key with `$env:OLLAMA_API_KEY="your-api-key"`. See [Ollama's cloud setup](https://docs.ollama.com/cloud) for obtaining a key.
 
-## Live Ollama run
+The first retrieval downloads the embedding model; later runs reuse its cache. Importing `RAG.py` does not download weights or require an API key.
 
-Set `OLLAMA_API_KEY` in your environment. `.env.example` lists the variables. Scripts do not load `.env` automatically; on Bash/Zsh, after copying and editing it, use `set -a; source .env; set +a`. Never commit a populated `.env`.
+## Usage
 
-```bash
-# Check model IDs and update examples/models.json if necessary.
-python batch_llm_runner.py --list-models
-
-# Three questions, three models: nine initial API calls, plus eligible revisions.
-python pipeline.py --prompts examples/prompts.csv --models-file examples/models.json --output-dir runs/live
-
-# Resume the same inputs and settings; explicitly retry failed requests.
-python pipeline.py --prompts examples/prompts.csv --models-file examples/models.json --output-dir runs/live --resume --retry-failed
-
-# Optional LLM assessment, separate from numerical similarity.
-python pipeline.py --output-dir runs/with-reviewer --reviewer gpt-oss:120b
-
-# Analyze an existing CSV without correction/reviewer API calls.
-python RAG.py --results results.csv --analyze-only --output-dir runs/analysis
-
-# Collect answers only, independently of the RAG code.
-python batch_llm_runner.py --output runs/batch/results.csv
-```
-
-Cloud usage is governed by your Ollama account. A reviewer adds one request per successful revision. Example model IDs were advertised by the provider on 2026-09-22; these are not the original paper's model lineup. Availability can change, so preflight rejects unavailable IDs. [Ollama Cloud documentation](https://docs.ollama.com/cloud).
-
-For local Ollama, set `OLLAMA_HOST=http://localhost:11434`, leave the key unset, and supply a JSON alias-to-ID mapping with three or more different installed models. The scripts do not install generation models.
-
-Paths are relative to the current working directory unless absolute, except the bundled demo resolves its prompt file relative to the script. See `--help` for threshold, top-k, timeout, retries, token limit, temperature, and embedding-model options.
-
-## Implemented method
-
-1. **Collect:** send each unique question to each distinct API model. Store answer text, alias, model ID, status, latency, attempts, and timestamp. Failures have a separate error field and an empty answer.
-2. **Embed:** convert successful answers to the same question into sentence vectors.
-3. **Compare:** an answer's score is its **mean cosine similarity to all other successful answers**, excluding itself. Below the configurable threshold (default `0.85`) means a candidate for revision, not a proven factual error.
-4. **Choose references:** find the unique largest group in which every pair meets the threshold. Require at least two references and three successful models overall. Abstain when equally large groups compete or no agreeing pair exists. Members of the reference group are not revised just because an outlier lowered their overall mean.
-5. **Retrieve:** embed the **original question**, rank the reference answers by similarity to it, and keep up to `--top-k`. The target cannot be its own reference.
-6. **Revise:** send the original question and actual reference text to the target model. References are explicitly described as unverified peer answers, not ground truth.
-7. **Measure:** compare the revised answer to the **same original peer answers** used for the before score. Store any optional evaluator judgment separately.
-
-The exact reference-group search is bounded to 12 successful models per question. The largest agreeing group need not be a majority, and agreement is not independent factual verification. Long answers can exceed the embedding model's token limit; the examples intentionally request short answers. Thresholds require validation against suitable labeled data before accuracy claims. This uses references stored in CSV, not a vector database, and does not train or fine-tune models.
-
-## Reliability and outputs
-
-- Configurable request timeouts and bounded retries for connection failures, rate limits, and selected server errors; permanent client errors are not repeatedly retried.
-- Empty/truncated responses are failures and are not embedded as answers.
-- CSV/JSON checkpoints are flushed and atomically replaced after completed calls. A process stopping between a remote response and its local checkpoint can still repeat that one request.
-- Resume checks input/configuration fingerprints. Changed settings require a new output location. `--retry-failed` can retry a failed reviewer without regenerating its successful revision.
-- Run only one process per output location; checkpoints are not a multi-writer database.
-
-| File | Contents |
-|---|---|
-| `results.csv` | Answers, model IDs, request statuses, timing, attempts |
-| `results.csv.meta.json` | Input/configuration fingerprint and settings, without credentials |
-| `corrections.checkpoint.json` | Completed revisions and reviewer results for resume |
-| `report.json` | Structured scores, selected references, revision statuses |
-| `report.md` | Human-readable before/after report |
-
-Exit codes: `0` completed without request errors; `1` report produced with collection/revision/reviewer errors; `2` configuration/input error; `130` interrupted. Skipped revisions have explicit reasons and are not API failures.
-
-## Existing CSVs and manual correction
-
-Original CSVs with `prompt,model,response,latency_sec` are accepted for analysis. Legacy `OLLAMA_CLOUD_ERROR:` text is excluded. Live correction also needs actual API IDs in a `model_id` column; old aliases are not silently mapped to replacement models.
-
-The original manual function remains:
+Run the batch runner and copy its `results.csv` into this repository. Review the answers and select suitable references. Edit the example at the bottom of `RAG.py`, then run `python RAG.py`. Or call the function directly:
 
 ```python
 from RAG import run_rag_correction
 
 run_rag_correction(
-    prompt="What is the capital of France? Answer in one sentence.",
+    prompt="What is the capital of France?",
     wrong_model="gemma",
-    correct_models=["gpt_oss_120b", "qwen"],
-    results_csv="runs/live/results.csv",
-    output_csv="runs/manual.csv",
-    top_k=2,
+    correct_models=["gpt_oss_120b", "deepseek", "qwen3"],
+    results_csv="results.csv",
+    output_csv="rag_corrections.csv",
 )
 ```
 
-`wrong_model` and `correct_models` are legacy names for user-selected targets/references, not guarantees of correctness. This path bypasses automatic selection. For legacy CSVs without API IDs, pass `model_id` explicitly. `RAG.py` also supports the same CLI as `pipeline.py`.
+CSV paths are relative to `RAG.py`; absolute paths also work. Each question/model pair must have one response. Empty answers and `OLLAMA_CLOUD_ERROR:` entries are excluded. Missing references or a target used as its own reference cause a clear error. Failed generations are not saved as corrected answers. Each successful run appends one row.
 
-## Code map and checks
+Output columns are `prompt`, `wrong_model`, `original_answer`, `corrected_answer`, `correct_models_used`, and `num_correct_references`. “Corrected” means revised, not independently verified. The example model selections illustrate usage and are not a quality ranking; the prompt must match the question in the input CSV.
 
-- `batch_llm_runner.py`: HTTP client, validation, retries, atomic collection checkpoints.
-- `rag_core.py`: embeddings, scoring, reference selection, revision/reviewer prompts, reports.
-- `pipeline.py`: end-to-end command line.
-- `RAG.py`: original manual entry point.
-- `demo_fixtures.py`: labeled synthetic test data and responses.
-- `tests/`: failure, resume, reference-selection, and CLI integration tests.
+## Models
+
+`MODEL_MAP` maps CSV aliases to API model IDs from the [public Ollama model list](https://ollama.com/api/tags), checked September 22, 2026:
+
+| Alias | Current API model |
+| --- | --- |
+| `gpt_oss_120b` | `gpt-oss:120b` |
+| `deepseek` | `deepseek-v4.1-flash` |
+| `qwen3` | `qwen3.5:397b` |
+| `gemma` | `gemma4:31b` |
+
+These defaults are **not the exact historical experiment lineup**. Keep `MODEL_MAP` consistent with the batch runner's `ALL_MODELS` so new answers and revisions use the same models. For historical CSVs, configure the original model if still available; using a newer model is a separate experiment.
+
+## Checks
 
 ```bash
-python3 -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 ```
 
-Tests require no credentials, embedding dependencies, or internet access. GitHub Actions runs them and the offline demo. See [VALIDATION.md](VALIDATION.md) for checks actually performed. The standalone collector is also maintained in [LLM_batch_runner](https://github.com/brianfeng31/LLM_batch_runner).
+Tests use controlled vectors and mocked cloud responses to check retrieval, reference validation, API errors, and CSV output, without a key or model download. A separate local check exercised the actual pretrained encoder. Authenticated live cloud generation has not been verified.
