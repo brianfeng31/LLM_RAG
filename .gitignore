@@ -28,3 +28,11 @@ results.csv
 .DS_Store
 Thumbs.db
 
+# Local runs, model weights, and dependency caches
+runs/
+.cache/
+*.csv.meta.json
+*.checkpoint.json
+.env.*
+!.env.example
+!examples/*.csv
